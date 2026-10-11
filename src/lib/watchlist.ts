@@ -1,10 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { ALL_STORE_IDS } from "@/lib/money";
 
 export type WatchItem = {
   id: string;
   name: string;
   threshold: number;
+  onSale: boolean;
   lastPrice: number | null;
   lastRetailer: string | null;
   lastChecked: string | null;
@@ -13,6 +15,17 @@ export type WatchItem = {
   lastImage: string | null;
   lastOriginal: number | null;
   lastSavings: number | null;
+  lastUnitLabel: string | null;
+};
+
+export type CartLine = {
+  id: string;
+  name: string;
+  price: number;
+  qty: number;
+  imageUrl: string | null;
+  productUrl: string | null;
+  unitLabel: string | null;
 };
 
 type LegacyItem = {
@@ -26,12 +39,23 @@ type LegacyItem = {
   lastName?: string | null;
 };
 
+type NewItem = {
+  name: string;
+  threshold: number;
+  onSale?: boolean;
+  lastPrice?: number | null;
+  lastRetailer?: string | null;
+  lastUnitLabel?: string | null;
+};
+
 type WatchState = {
   items: WatchItem[];
+  cart: CartLine[];
+  retailers: string[];
   lastGlobalCheck: string | null;
   hydrated: boolean;
   setHydrated: () => void;
-  addItem: (item: Pick<WatchItem, "name" | "threshold">) => void;
+  addItem: (item: NewItem) => void;
   removeItem: (id: string) => void;
   restoreItem: (item: WatchItem) => void;
   setThreshold: (id: string, threshold: number) => void;
@@ -47,11 +71,37 @@ type WatchState = {
       | "lastImage"
       | "lastOriginal"
       | "lastSavings"
+      | "lastUnitLabel"
+      | "onSale"
     >,
   ) => void;
   setLastGlobalCheck: (iso: string) => void;
   clearAll: () => void;
+  toggleRetailer: (id: string) => void;
+  setRetailers: (ids: string[]) => void;
+  addToCart: (line: Omit<CartLine, "qty"> & { qty?: number }) => void;
+  setCartQty: (id: string, qty: number) => void;
+  removeFromCart: (id: string) => void;
 };
+
+function blankItem(input: NewItem): WatchItem {
+  const onSale = input.onSale !== false;
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: input.name,
+    threshold: input.threshold,
+    onSale,
+    lastPrice: input.lastPrice ?? null,
+    lastRetailer: input.lastRetailer ?? null,
+    lastChecked: onSale ? null : new Date().toISOString(),
+    lastProductUrl: null,
+    lastName: null,
+    lastImage: null,
+    lastOriginal: null,
+    lastSavings: null,
+    lastUnitLabel: input.lastUnitLabel ?? null,
+  };
+}
 
 function readLegacy(): { items: WatchItem[]; lastGlobalCheck: string | null } | null {
   if (typeof localStorage === "undefined") return null;
@@ -66,6 +116,7 @@ function readLegacy(): { items: WatchItem[]; lastGlobalCheck: string | null } | 
         id: String(row.id ?? `${row.name}-${row.threshold}`),
         name: row.name as string,
         threshold: row.threshold as number,
+        onSale: true,
         lastPrice: row.lastPrice ?? null,
         lastRetailer: row.lastRetailer ?? null,
         lastChecked: row.lastChecked ?? null,
@@ -74,6 +125,7 @@ function readLegacy(): { items: WatchItem[]; lastGlobalCheck: string | null } | 
         lastImage: null,
         lastOriginal: null,
         lastSavings: null,
+        lastUnitLabel: null,
       }));
     return {
       items,
@@ -88,28 +140,12 @@ export const useWatchlist = create<WatchState>()(
   persist(
     (set) => ({
       items: [],
+      cart: [],
+      retailers: ALL_STORE_IDS,
       lastGlobalCheck: null,
       hydrated: false,
       setHydrated: () => set({ hydrated: true }),
-      addItem: ({ name, threshold }) =>
-        set((state) => ({
-          items: [
-            {
-              id: `${Date.now()}`,
-              name,
-              threshold,
-              lastPrice: null,
-              lastRetailer: null,
-              lastChecked: null,
-              lastProductUrl: null,
-              lastName: null,
-              lastImage: null,
-              lastOriginal: null,
-              lastSavings: null,
-            },
-            ...state.items,
-          ],
-        })),
+      addItem: (input) => set((state) => ({ items: [blankItem(input), ...state.items] })),
       removeItem: (id) => set((state) => ({ items: state.items.filter((item) => item.id !== id) })),
       restoreItem: (item) =>
         set((state) => ({
@@ -125,11 +161,58 @@ export const useWatchlist = create<WatchState>()(
         })),
       setLastGlobalCheck: (iso) => set({ lastGlobalCheck: iso }),
       clearAll: () => set({ items: [] }),
+      toggleRetailer: (id) =>
+        set((state) => {
+          const has = state.retailers.includes(id);
+          if (has && state.retailers.length === 1) return state;
+          return {
+            retailers: has ? state.retailers.filter((row) => row !== id) : [...state.retailers, id],
+          };
+        }),
+      setRetailers: (ids) => set({ retailers: ids.length > 0 ? ids : ALL_STORE_IDS }),
+      addToCart: (line) =>
+        set((state) => {
+          const existing = state.cart.find((row) => row.id === line.id);
+          if (existing) {
+            return {
+              cart: state.cart.map((row) =>
+                row.id === line.id ? { ...row, qty: row.qty + (line.qty ?? 1), price: line.price } : row,
+              ),
+            };
+          }
+          return {
+            cart: [
+              {
+                id: line.id,
+                name: line.name,
+                price: line.price,
+                qty: line.qty ?? 1,
+                imageUrl: line.imageUrl,
+                productUrl: line.productUrl,
+                unitLabel: line.unitLabel,
+              },
+              ...state.cart,
+            ],
+          };
+        }),
+      setCartQty: (id, qty) =>
+        set((state) => ({
+          cart:
+            qty < 1
+              ? state.cart.filter((row) => row.id !== id)
+              : state.cart.map((row) => (row.id === id ? { ...row, qty } : row)),
+        })),
+      removeFromCart: (id) => set((state) => ({ cart: state.cart.filter((row) => row.id !== id) })),
     }),
     {
       name: "aanbieding-alert-v1",
       skipHydration: true,
-      partialize: (state) => ({ items: state.items, lastGlobalCheck: state.lastGlobalCheck }),
+      partialize: (state) => ({
+        items: state.items,
+        cart: state.cart,
+        retailers: state.retailers,
+        lastGlobalCheck: state.lastGlobalCheck,
+      }),
       onRehydrateStorage: () => (state) => {
         if (state && state.items.length === 0) {
           const legacy = readLegacy();
@@ -138,6 +221,10 @@ export const useWatchlist = create<WatchState>()(
             state.lastGlobalCheck = legacy.lastGlobalCheck;
           }
         }
+        if (state && (!state.retailers || state.retailers.length === 0)) {
+          state.retailers = ALL_STORE_IDS;
+        }
+        if (state && !state.cart) state.cart = [];
         state?.setHydrated();
       },
     },

@@ -1,7 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
+import { ALL_STORE_IDS } from "@/lib/money";
 
 const API = "https://www.prijsprofeet.nl/api/v1";
 const UA = "AanbiedingAlert/1.0 (prijsalert; contact via app)";
+const ALLOWED = new Set(ALL_STORE_IDS);
 
 export type Offer = {
   id: string;
@@ -12,6 +14,9 @@ export type Offer = {
   imageUrl: string | null;
   productUrl: string | null;
   quantity: string | null;
+  unit: string | null;
+  unitPrice: number | null;
+  onSale: boolean;
   savingsPercentage: number | null;
   validUntil: string | null;
   brand: string | null;
@@ -63,6 +68,9 @@ export function mapOffer(raw: unknown): Offer | null {
     imageUrl: str(p.image_url),
     productUrl: str(p.product_url),
     quantity: str(p.quantity),
+    unit: str(p.unit),
+    unitPrice: num(p.unit_price),
+    onSale: p.is_promotional !== false && p.promotion_status !== "shelf",
     savingsPercentage: num(p.savings_percentage),
     validUntil: str(p.valid_until),
     brand: str(p.brand),
@@ -74,36 +82,90 @@ function cheapest(offers: Offer[]): Offer[] {
 }
 
 export const searchOffers = createServerFn({ method: "GET" })
-  .validator((input: { q?: string }) => {
+  .validator((input: { q?: string; retailers?: string[]; dealsOnly?: boolean }) => {
     const q = (input?.q ?? "").trim().slice(0, 80);
-    return { q };
+    const retailers = Array.isArray(input?.retailers)
+      ? input.retailers.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 20)
+      : [];
+    return { q, retailers, dealsOnly: input?.dealsOnly !== false };
   })
   .handler(async ({ data }) => {
     if (data.q.length < 2) return { results: [] as Offer[], error: null as string | null };
-    const url = `${API}/search?q=${encodeURIComponent(data.q)}&promotion_status=active&page_size=12`;
-    const res = await cachedGet(url);
+    const params = new URLSearchParams({ q: data.q, page_size: "60" });
+    if (data.dealsOnly) params.set("promotion_status", "active");
+    if (data.retailers.length > 0) params.set("retailer", data.retailers.join(","));
+    const res = await cachedGet(`${API}/search?${params.toString()}`);
     if (!res.ok) return { results: [] as Offer[], error: res.error };
     const body = res.body as { results?: unknown[] };
-    const results = cheapest((body.results ?? []).map(mapOffer).filter((o): o is Offer => o != null));
+    const allow = data.retailers.length > 0 ? new Set(data.retailers) : null;
+    const results = cheapest(
+      (body.results ?? [])
+        .map(mapOffer)
+        .filter((offer): offer is Offer => offer != null && (allow == null || allow.has(offer.retailer))),
+    );
     return { results, error: null as string | null };
   });
 
-export const fetchTopDeals = createServerFn({ method: "GET" }).handler(async () => {
-  const res = await cachedGet(`${API}/deals/top?limit=20`);
-  if (!res.ok) return { results: [] as Offer[], error: res.error };
-  const body = res.body as {
-    top_by_percentage?: { representative_product?: unknown }[];
-    top_by_amount?: { representative_product?: unknown }[];
-  };
-  const rows = [...(body.top_by_percentage ?? []), ...(body.top_by_amount ?? [])];
-  const seen = new Set<string>();
-  const results: Offer[] = [];
-  for (const row of rows) {
-    const offer = mapOffer(row.representative_product);
-    if (!offer || seen.has(offer.id)) continue;
-    seen.add(offer.id);
-    results.push(offer);
-  }
-  results.sort((a, b) => (b.savingsPercentage ?? 0) - (a.savingsPercentage ?? 0));
-  return { results, error: null as string | null };
-});
+function pageSizeFor(storeCount: number): number {
+  if (storeCount <= 1) return 48;
+  if (storeCount <= 4) return 20;
+  return 8;
+}
+
+export const browseDeals = createServerFn({ method: "GET" })
+  .validator((input: { retailers?: string[] }) => {
+    const picked = Array.isArray(input?.retailers)
+      ? input.retailers.filter((id): id is string => ALLOWED.has(id))
+      : [];
+    return { retailers: picked.length > 0 ? picked : ALL_STORE_IDS };
+  })
+  .handler(async ({ data }) => {
+    const stores = data.retailers;
+    const pageSize = pageSizeFor(stores.length);
+    const pages = await Promise.all(
+      stores.map(async (retailer) => {
+        const params = new URLSearchParams({
+          promotion_status: "active",
+          is_promotional: "true",
+          retailer,
+          page_size: String(pageSize),
+          sort_by: "extracted_at",
+          sort_order: "desc",
+        });
+        const res = await cachedGet(`${API}/products?${params.toString()}`);
+        if (!res.ok) return { offers: [] as Offer[], error: res.error };
+        const body = res.body as { products?: unknown[] };
+        const offers = (body.products ?? [])
+          .map(mapOffer)
+          .filter((offer): offer is Offer => offer != null && offer.retailer === retailer);
+        offers.sort((a, b) => (b.savingsPercentage ?? 0) - (a.savingsPercentage ?? 0));
+        return { offers, error: null as string | null };
+      }),
+    );
+
+    const buckets = pages.map((page) => page.offers);
+    const mixed: Offer[] = [];
+    const seen = new Set<string>();
+    const cap = 80;
+    let progressed = true;
+    while (mixed.length < cap && progressed) {
+      progressed = false;
+      for (const bucket of buckets) {
+        while (bucket.length > 0) {
+          const next = bucket.shift();
+          if (!next || seen.has(next.id)) continue;
+          seen.add(next.id);
+          mixed.push(next);
+          progressed = true;
+          break;
+        }
+        if (mixed.length >= cap) break;
+      }
+    }
+
+    if (mixed.length === 0) {
+      const error = pages.find((page) => page.error)?.error ?? null;
+      return { results: [] as Offer[], error };
+    }
+    return { results: mixed, error: null as string | null };
+  });
