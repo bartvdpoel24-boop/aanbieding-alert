@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AanbiedingAlert – Wacht op de juiste prijs</title>
+  <meta name="description" content="Voeg boodschappen toe die je alleen in de aanbieding wilt kopen. Krijg een melding als de prijs onder jouw drempel komt.">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --success: #16a34a;
+      --warning: #f59e0b;
+      --danger: #dc2626;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #1e293b;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      background: linear-gradient(135deg, var(--primary), #7c3aed);
+      color: white;
+      padding: 1.5rem 1rem;
+      text-align: center;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    header h1 { margin: 0; font-size: 1.6rem; }
+    header p { margin: 0.3rem 0 0; opacity: 0.9; font-size: 0.95rem; }
+    nav {
+      display: flex;
+      background: white;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 92px;
+      z-index: 9;
+    }
+    nav button {
+      flex: 1;
+      padding: 0.9rem 0.5rem;
+      border: none;
+      background: none;
+      font-size: 0.95rem;
+      cursor: pointer;
+      color: var(--muted);
+      border-bottom: 3px solid transparent;
+    }
+    nav button.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+      font-weight: 600;
+    }
+    main { max-width: 800px; margin: 0 auto; padding: 1rem; }
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 1.2rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      border: 1px solid var(--border);
+    }
+    .item {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+      padding: 0.8rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .item:last-child { border-bottom: none; }
+    .item-info h3 { margin: 0 0 0.3rem; font-size: 1.1rem; }
+    .item-info .meta { font-size: 0.85rem; color: var(--muted); }
+    .price-ok { color: var(--success); font-weight: 600; }
+    .price-high { color: var(--danger); }
+    .actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+    button, .btn {
+      padding: 0.5rem 0.9rem;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.9rem;
+      background: var(--primary);
+      color: white;
+    }
+    button.secondary { background: #e2e8f0; color: var(--text); }
+    button.danger { background: var(--danger); }
+    button.small { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+    input, select {
+      width: 100%;
+      padding: 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 1rem;
+      margin-bottom: 0.8rem;
+    }
+    .form-row { display: flex; gap: 0.8rem; }
+    .form-row > * { flex: 1; }
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .suggestion-chip {
+      background: #eff6ff;
+      color: var(--primary);
+      padding: 0.4rem 0.8rem;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      border: 1px solid #bfdbfe;
+    }
+    .suggestion-chip:hover { background: #dbeafe; }
+    .status-banner {
+      padding: 0.8rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+    }
+    .status-ok { background: #dcfce7; color: #166534; }
+    .status-warn { background: #fef3c7; color: #92400e; }
+    .deal-card {
+      display: flex;
+      gap: 0.8rem;
+      padding: 0.8rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .deal-card img { width: 60px; height: 60px; object-fit: contain; border-radius: 6px; background: #f1f5f9; }
+    .hidden { display: none; }
+    .empty { text-align: center; color: var(--muted); padding: 2rem; }
+    footer { text-align: center; padding: 2rem 1rem; color: var(--muted); font-size: 0.8rem; }
+    .threshold-input { max-width: 140px; }
+    @media (max-width: 600px) {
+      .form-row { flex-direction: column; }
+      .item { flex-direction: column; }
+      .actions { width: 100%; justify-content: flex-end; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛒 AanbiedingAlert</h1>
+    <p>Koop alleen als de prijs laag genoeg is</p>
+  </header>
+
+  <nav>
+    <button class="active" data-tab="list">Mijn lijst</button>
+    <button data-tab="add">Toevoegen</button>
+    <button data-tab="settings">Instellingen</button>
+    <button data-tab="deals">Aanbiedingen</button>
+  </nav>
+
+  <main>
+    <!-- LIST TAB -->
+    <section id="tab-list">
+      <div id="status-banner" class="status-banner status-ok hidden"></div>
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <h2 style="margin:0;">Jouw producten</h2>
+          <button id="check-all" class="small">Check alles nu</button>
+        </div>
+        <div id="items-list"></div>
+        <div id="empty-list" class="empty">Nog geen producten. Voeg er een toe via het tabblad ‘Toevoegen’.</div>
+      </div>
+    </section>
+
+    <!-- ADD TAB -->
+    <section id="tab-add" class="hidden">
+      <div class="card">
+        <h2>Product toevoegen</h2>
+        <label>Productnaam</label>
+        <input type="text" id="product-name" placeholder="bijv. toiletpapier, wasmiddel, koffiebonen...">
+        <div id="search-results" style="margin-bottom:1rem;"></div>
+
+        <div class="form-row">
+          <div>
+            <label>Maximale prijs (€) waaronder je melding wilt</label>
+            <input type="number" id="threshold" step="0.01" min="0" placeholder="bijv. 3.50">
+          </div>
+          <div style="display:flex; align-items:flex-end; gap:0.5rem;">
+            <button type="button" id="grok-suggest" class="secondary">Grok stelt prijs voor</button>
+          </div>
+        </div>
+        <div id="suggestion-result" style="margin:0.5rem 0; font-size:0.9rem;"></div>
+
+        <button id="add-item" style="width:100%; padding:0.8rem;">Toevoegen aan mijn lijst</button>
+      </div>
+    </section>
+
+    <!-- SETTINGS TAB -->
+    <section id="tab-settings" class="hidden">
+      <div class="card">
+        <h2>Suggesties om toe te voegen</h2>
+        <p style="color:var(--muted); margin-top:0;">Producten die mensen vaak alleen in de aanbieding kopen:</p>
+        <div class="suggestions" id="suggested-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Notificaties</h2>
+        <p>Krijg een melding wanneer een product onder jouw drempelprijs komt.</p>
+        <button id="enable-notifications">Notificaties inschakelen</button>
+        <p id="notif-status" style="margin-top:0.5rem; font-size:0.9rem;"></p>
+      </div>
+
+      <div class="card">
+        <h2>Over de data</h2>
+        <p style="font-size:0.9rem;">Aanbiedingen worden dagelijks opgehaald via de PrijsProfeet API (meer dan 10 Nederlandse supermarkten: AH, Jumbo, Lidl, Aldi, PLUS, Dirk, etc.).<br>
+        Data wordt elke nacht ververst. Bron: <a href="https://www.prijsprofeet.nl" target="_blank">prijsprofeet.nl</a></p>
+      </div>
+    </section>
+
+    <!-- DEALS TAB -->
+    <section id="tab-deals" class="hidden">
+      <div class="card">
+        <h2>Populaire aanbiedingen deze week</h2>
+        <button id="load-top-deals" class="secondary">Laad topaanbiedingen</button>
+        <div id="top-deals" style="margin-top:1rem;"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    AanbiedingAlert · Gebouwd met hulp van Grok · Data via PrijsProfeet
+  </footer>
+
+  <script>
+    const API_BASE = 'https://www.prijsprofeet.nl/api/v1';
+    const USER_AGENT = 'AanbiedingAlert/1.0 (grok@x.ai)';
+
+    const SUGGESTED_ITEMS = [
+      'Toiletpapier', 'WC papier', 'Wasmiddel', 'Waspoeder', 'Vaatwastabletten',
+      'Keukenpapier', 'Luiers', 'Koffiebonen', 'Koffiepads', 'Douwe Egberts',
+      'Cola', 'Frisdrank', 'Douchegel', 'Shampoo', 'Deodorant',
+      'Afwasmiddel', 'Allesreiniger', 'WC blok', 'Tandpasta', 'Mondwater',
+      'Pasta', 'Rijst', 'Houdbare melk', 'Pindakaas', 'Nutella'
+    ];
+
+    let items = JSON.parse(localStorage.getItem('aanbiedingItems') || '[]');
+    let lastGlobalCheck = localStorage.getItem('lastGlobalCheck') || null;
+
+    // Tabs
+    document.querySelectorAll('nav button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelectorAll('main section').forEach(s => s.classList.add('hidden'));
+        document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
+        if (btn.dataset.tab === 'list') renderList();
+        if (btn.dataset.tab === 'settings') renderSuggestions();
+      });
+    });
+
+    function saveItems() {
+      localStorage.setItem('aanbiedingItems', JSON.stringify(items));
+    }
+
+    function renderList() {
+      const listEl = document.getElementById('items-list');
+      const emptyEl = document.getElementById('empty-list');
+      listEl.innerHTML = '';
+      if (items.length === 0) {
+        emptyEl.classList.remove('hidden');
+        return;
+      }
+      emptyEl.classList.add('hidden');
+      items.forEach((item, idx) => {
+        const div = document.createElement('div');
+        div.className = 'item';
+        const priceClass = item.lastPrice && item.lastPrice <= item.threshold ? 'price-ok' : 'price-high';
+        div.innerHTML = `
+          <div class="item-info">
+            <h3>${item.name}</h3>
+            <div class="meta">
+              Drempel: <strong>€${item.threshold.toFixed(2)}</strong>
+              ${item.lastPrice ? ` · Laatste prijs: <span class="${priceClass}">€${item.lastPrice.toFixed(2)}</span> (${item.lastRetailer || ''})` : ''}
+              ${item.lastChecked ? `<br>Gecontroleerd: ${new Date(item.lastChecked).toLocaleString('nl-NL')}` : ''}
+            </div>
+          </div>
+          <div class="actions">
+            <button class="small secondary" onclick="checkItem(${idx})">Check</button>
+            <button class="small danger" onclick="removeItem(${idx})">Verwijder</button>
+          </div>
+        `;
+        listEl.appendChild(div);
+      });
+    }
+
+    function renderSuggestions() {
+      const el = document.getElementById('suggested-list');
+      el.innerHTML = '';
+      SUGGESTED_ITEMS.forEach(name => {
+        const chip = document.createElement('div');
+        chip.className = 'suggestion-chip';
+        chip.textContent = name;
+        chip.onclick = () => {
+          document.querySelector('[data-tab="add"]').click();
+          document.getElementById('product-name').value = name;
+          document.getElementById('product-name').focus();
+        };
+        el.appendChild(chip);
+      });
+    }
+
+    async function searchProducts(query) {
+      if (!query || query.length < 2) return [];
+      try {
+        const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}&promotion_status=active&page_size=8`, {
+          headers: { 'User-Agent': USER_AGENT }
+        });
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        return data.results || [];
+      } catch (e) {
+        console.error(e);
+        return [];
+      }
+    }
+
+    async function checkItem(idx, silent = false) {
+      const item = items[idx];
+      const results = await searchProducts(item.name);
+      if (results.length === 0) {
+        if (!silent) alert('Geen actieve aanbiedingen gevonden voor ' + item.name);
+        return;
+      }
+      // Find the cheapest
+      const cheapest = results.reduce((min, r) => r.price < min.price ? r : min, results[0]);
+      item.lastPrice = cheapest.price;
+      item.lastRetailer = cheapest.retailer;
+      item.lastChecked = new Date().toISOString();
+      item.lastProductUrl = cheapest.product_url;
+      item.lastName = cheapest.name;
+      saveItems();
+      renderList();
+
+      if (cheapest.price <= item.threshold) {
+        const msg = `${item.name} is in de aanbieding! €${cheapest.price.toFixed(2)} bij ${cheapest.retailer}`;
+        if (Notification.permission === 'granted') {
+          new Notification('AanbiedingAlert', { body: msg });
+        }
+        if (!silent) alert(msg + '\n\n' + (cheapest.product_url || ''));
+      } else if (!silent) {
+        alert(`${item.name}: laagste gevonden prijs €${cheapest.price.toFixed(2)} bij ${cheapest.retailer} (drempel €${item.threshold.toFixed(2)})`);
+      }
+    }
+
+    async function checkAll(silent = false) {
+      const banner = document.getElementById('status-banner');
+      banner.classList.remove('hidden');
+      banner.className = 'status-banner status-warn';
+      banner.textContent = 'Bezig met controleren...';
+      for (let i = 0; i < items.length; i++) {
+        await checkItem(i, true);
+        await new Promise(r => setTimeout(r, 300)); // rate limit friendly
+      }
+      lastGlobalCheck = new Date().toISOString();
+      localStorage.setItem('lastGlobalCheck', lastGlobalCheck);
+      banner.className = 'status-banner status-ok';
+      banner.textContent = `Laatste check: ${new Date().toLocaleString('nl-NL')}`;
+      setTimeout(() => banner.classList.add('hidden'), 4000);
+      if (!silent) alert('Alle producten gecontroleerd.');
+    }
+
+    function removeItem(idx) {
+      if (confirm('Verwijderen?')) {
+        items.splice(idx, 1);
+        saveItems();
+        renderList();
+      }
+    }
+
+    // Add item
+    document.getElementById('add-item').addEventListener('click', () => {
+      const name = document.getElementById('product-name').value.trim();
+      const threshold = parseFloat(document.getElementById('threshold').value);
+      if (!name || isNaN(threshold) || threshold <= 0) {
+        alert('Vul een productnaam en een geldige prijs in.');
+        return;
+      }
+      items.push({
+        id: Date.now(),
+        name,
+        threshold,
+        lastPrice: null,
+        lastRetailer: null,
+        lastChecked: null
+      });
+      saveItems();
+      document.getElementById('product-name').value = '';
+      document.getElementById('threshold').value = '';
+      document.getElementById('suggestion-result').innerHTML = '';
+      document.querySelector('[data-tab="list"]').click();
+    });
+
+    // Grok suggest
+    document.getElementById('grok-suggest').addEventListener('click', async () => {
+      const name = document.getElementById('product-name').value.trim();
+      if (!name) {
+        alert('Vul eerst een productnaam in.');
+        return;
+      }
+      const btn = document.getElementById('grok-suggest');
+      btn.disabled = true;
+      btn.textContent = 'Bezig...';
+      const results = await searchProducts(name);
+      btn.disabled = false;
+      btn.textContent = 'Grok stelt prijs voor';
+      const el = document.getElementById('suggestion-result');
+      if (results.length === 0) {
+        el.innerHTML = '<span style="color:var(--warning);">Geen actieve aanbiedingen gevonden. Probeer een andere naam of zet later een drempel.</span>';
+        return;
+      }
+      const prices = results.map(r => r.price).filter(p => p > 0);
+      const lowest = Math.min(...prices);
+      const avg = prices.reduce((a,b)=>a+b,0) / prices.length;
+      // Suggest a bit under the current lowest or 70% of average original if available
+      const originals = results.map(r => r.original_price).filter(p => p && p > 0);
+      let suggested = lowest;
+      if (originals.length) {
+        const avgOrig = originals.reduce((a,b)=>a+b,0) / originals.length;
+        suggested = Math.min(lowest, Math.round(avgOrig * 0.65 * 100) / 100);
+      }
+      suggested = Math.round(suggested * 100) / 100;
+      el.innerHTML = `
+        <strong>Grok stelt voor:</strong> €${suggested.toFixed(2)}<br>
+        Huidige laagste aanbieding: €${lowest.toFixed(2)} (${results[0].retailer})<br>
+        <button class="small" onclick="document.getElementById('threshold').value=${suggested}">Gebruik deze prijs</button>
+      `;
+    });
+
+    // Live search preview
+    let searchTimeout;
+    document.getElementById('product-name').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      const q = e.target.value.trim();
+      const container = document.getElementById('search-results');
+      if (q.length < 3) { container.innerHTML = ''; return; }
+      searchTimeout = setTimeout(async () => {
+        const results = await searchProducts(q);
+        if (results.length === 0) { container.innerHTML = '<small>Geen resultaten</small>'; return; }
+        container.innerHTML = results.slice(0,5).map(r => 
+          `<div style="font-size:0.85rem; padding:0.3rem 0; border-bottom:1px solid #eee;">
+            €${r.price.toFixed(2)} · ${r.name} <span style="color:var(--muted);">(${r.retailer})</span>
+          </div>`
+        ).join('');
+      }, 400);
+    });
+
+    // Notifications
+    document.getElementById('enable-notifications').addEventListener('click', async () => {
+      const perm = await Notification.requestPermission();
+      document.getElementById('notif-status').textContent = 
+        perm === 'granted' ? 'Notificaties zijn ingeschakeld!' : 'Notificaties niet toegestaan.';
+    });
+
+    // Top deals
+    document.getElementById('load-top-deals').addEventListener('click', async () => {
+      const container = document.getElementById('top-deals');
+      container.innerHTML = 'Laden...';
+      try {
+        const res = await fetch(`${API_BASE}/deals/top?limit=12`, { headers: { 'User-Agent': USER_AGENT } });
+        const data = await res.json();
+        const deals = data.deals || data.results || [];
+        container.innerHTML = deals.slice(0,10).map(d => `
+          <div class="deal-card">
+            ${d.image_url ? `<img src="${d.image_url}" alt="">` : '<div style="width:60px;height:60px;background:#f1f5f9;border-radius:6px;"></div>'}
+            <div>
+              <strong>${d.name || d.title}</strong><br>
+              <span class="price-ok">€${(d.price || 0).toFixed(2)}</span>
+              ${d.original_price ? `<s style="color:var(--muted);">€${d.original_price.toFixed(2)}</s>` : ''}
+              · ${d.retailer}<br>
+              <small>${d.savings_percentage ? Math.round(d.savings_percentage)+'% korting' : ''}</small>
+            </div>
+          </div>
+        `).join('') || 'Geen deals gevonden.';
+      } catch (e) {
+        container.innerHTML = 'Kon deals niet laden.';
+      }
+    });
+
+    document.getElementById('check-all').addEventListener('click', () => checkAll(false));
+
+    // Auto check on load if more than 20 hours ago
+    function maybeAutoCheck() {
+      if (items.length === 0) return;
+      if (!lastGlobalCheck || (Date.now() - new Date(lastGlobalCheck).getTime()) > 20 * 60 * 60 * 1000) {
+        setTimeout(() => checkAll(true), 1500);
+      }
+    }
+
+    // Init
+    renderList();
+    renderSuggestions();
+    if (Notification.permission === 'granted') {
+      document.getElementById('notif-status').textContent = 'Notificaties zijn ingeschakeld.';
+    }
+    maybeAutoCheck();
+
+    // Service worker registration (optional for PWA)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>
