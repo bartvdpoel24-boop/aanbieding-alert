@@ -28,6 +28,7 @@ type AhHit = {
   price: number;
   was: number | null;
   size: string | null;
+  unitLabel: string | null;
   image: string | null;
 };
 
@@ -106,27 +107,33 @@ async function searchAh(query: string, size: number): Promise<AhHit[]> {
       webshopId?: number;
       title?: string;
       brand?: string;
-      currentPrice?: number;
-      priceBeforeBonus?: number;
-      salesUnitSize?: string;
+      currentPrice?: number | null;
+      priceBeforeBonus?: number | null;
+      salesUnitSize?: string | null;
+      unitPriceDescription?: string | null;
       images?: { url?: string; width?: number }[];
     }[];
   };
   return (body.products ?? [])
-    .filter((row) => typeof row.webshopId === "number" && row.title && typeof row.currentPrice === "number")
+    .filter((row) => typeof row.webshopId === "number" && row.title)
     .map((row) => {
+      const current = typeof row.currentPrice === "number" ? row.currentPrice : null;
+      const before = typeof row.priceBeforeBonus === "number" ? row.priceBeforeBonus : null;
+      const price = current ?? before;
+      if (price == null || !(price > 0)) return null;
       const images = [...(row.images ?? [])].sort((a, b) => (a.width ?? 999) - (b.width ?? 999));
-      const was = row.priceBeforeBonus;
       return {
         id: row.webshopId as number,
         title: row.title as string,
         brand: row.brand ?? null,
-        price: row.currentPrice as number,
-        was: typeof was === "number" && was > (row.currentPrice as number) ? was : null,
+        price,
+        was: current != null && before != null && before > current ? before : null,
         size: row.salesUnitSize ?? null,
+        unitLabel: row.unitPriceDescription ?? null,
         image: images[0]?.url ?? null,
       };
-    });
+    })
+    .filter((row): row is AhHit => row != null);
 }
 
 async function searchJumbo(query: string): Promise<JumboHit[]> {
@@ -208,21 +215,21 @@ function tokens(value: string): string[] {
 }
 
 function sizeKey(value: string): string | null {
-  const match = value.toLowerCase().match(/(\d+(?:[.,]\d+)?)\s*(liter|rollen|rol|stuks|stuk|ml|cl|kg|g|l)\b/);
+  const match = value.toLowerCase().match(/(\d+(?:[.,]\d+)?)\s*(liter|litre|rollen|rol|tabletten|tablet|stuks|stuk|ml|cl|kg|g|l)\b/);
   if (!match) return null;
-  const unit = match[2] === "liter" ? "l" : match[2];
+  const unit = match[2] === "liter" || match[2] === "litre" ? "l" : match[2] === "tabletten" ? "tablet" : match[2];
   return `${match[1].replace(",", ".")}${unit}`;
 }
 
-function similarity(a: string, b: string): number {
-  const left = tokens(a);
-  const right = new Set(tokens(b));
+function similarity(query: string, candidate: string): number {
+  const left = tokens(query);
+  const right = new Set(tokens(candidate));
   if (left.length === 0 || right.size === 0) return 0;
   const hits = left.filter((part) => right.has(part)).length;
   let score = hits / Math.max(left.length, right.size);
-  const aSize = sizeKey(a);
-  const bSize = sizeKey(b);
-  if (aSize && bSize) score += aSize === bSize ? 0.3 : -0.25;
+  const querySize = sizeKey(query);
+  const candidateSize = sizeKey(candidate);
+  if (querySize && candidateSize) score += querySize === candidateSize ? 0.45 : -0.35;
   return score;
 }
 
@@ -252,13 +259,36 @@ function bestAh(hits: AhHit[], title: string): AhHit | null {
   return best;
 }
 
+function ahQueries(jumbo: JumboHit): string[] {
+  const plain = jumbo.title.replace(/[-/]+/g, " ").replace(/\s+/g, " ").trim();
+  const compact = (jumbo.size ?? "").toLowerCase().replace(/litre|liter/g, "l").replace(/\s+/g, "");
+  const brand = (jumbo.brand ?? plain.split(" ")[0] ?? "").replace(/-/g, " ");
+  const queries = [jumbo.title];
+  if (brand && compact) queries.push(`${brand} ${compact}`);
+  return [...new Set(queries.map((query) => query.trim()).filter((query) => query.length > 1))].slice(0, 2);
+}
+
+async function ahForJumbo(jumbo: JumboHit): Promise<AhHit | null> {
+  const lists = await Promise.all(ahQueries(jumbo).map((query) => searchAh(query, 12)));
+  const seen = new Set<number>();
+  const merged: AhHit[] = [];
+  for (const list of lists) {
+    for (const hit of list) {
+      if (seen.has(hit.id)) continue;
+      seen.add(hit.id);
+      merged.push(hit);
+    }
+  }
+  return bestAh(merged, `${jumbo.title} ${jumbo.size ?? ""}`);
+}
+
 function fromAh(hit: AhHit): ShelfPrice {
   return {
     title: hit.title,
     price: hit.price,
     was: hit.was,
     size: hit.size,
-    unitLabel: null,
+    unitLabel: hit.unitLabel,
     url: `https://www.ah.nl/producten/product/wi${hit.id}`,
   };
 }
@@ -291,10 +321,7 @@ export const compareAssortment = createServerFn({ method: "GET" })
         const [jumboHits, ahHits] = await Promise.all([searchJumbo(data.q), searchAh(data.q, 4)]);
         const jumbo = jumboHits[0] ?? null;
         let ah: AhHit | null = ahHits[0] ?? null;
-        if (ah == null && jumbo) {
-          const named = await searchAh(jumbo.title, 6);
-          ah = bestAh(named, `${jumbo.title} ${jumbo.size ?? ""}`);
-        }
+        if (jumbo) ah = (await ahForJumbo(jumbo)) ?? ah;
         if (!jumbo && !ah) return { results: [] as ComparedProduct[], error: null as string | null };
         const row: ComparedProduct = {
           id: jumbo?.id ?? `ah-${ah?.id}`,
@@ -313,7 +340,7 @@ export const compareAssortment = createServerFn({ method: "GET" })
         const jumboHits = (await searchJumbo(data.q)).slice(0, 6);
         const rows = await Promise.all(
           jumboHits.map(async (jumbo) => {
-            const ah = bestAh(await searchAh(`${jumbo.title} ${jumbo.size ?? ""}`.trim(), 6), `${jumbo.title} ${jumbo.size ?? ""}`);
+            const ah = await ahForJumbo(jumbo);
             return {
               id: jumbo.id,
               title: jumbo.title,
@@ -329,7 +356,7 @@ export const compareAssortment = createServerFn({ method: "GET" })
         return { results: rows, error: null as string | null };
       }
 
-      const ahHits = (await searchAh(data.q, 6)).slice(0, 6);
+      const ahHits = (await searchAh(data.q, 12)).slice(0, 8);
       const rows = await Promise.all(
         ahHits.map(async (ah) => {
           const jumbo = bestJumbo(await searchJumbo(`${ah.title} ${ah.size ?? ""}`.trim()), `${ah.title} ${ah.size ?? ""}`);
