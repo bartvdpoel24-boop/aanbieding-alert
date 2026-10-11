@@ -20,6 +20,7 @@ export type Offer = {
   savingsPercentage: number | null;
   validUntil: string | null;
   brand: string | null;
+  privateLabel: boolean;
 };
 
 type Raw = Record<string, unknown>;
@@ -74,12 +75,65 @@ export function mapOffer(raw: unknown): Offer | null {
     savingsPercentage: num(p.savings_percentage),
     validUntil: str(p.valid_until),
     brand: str(p.brand),
+    privateLabel: p.private_label === true,
   };
 }
 
 function cheapest(offers: Offer[]): Offer[] {
   return [...offers].sort((a, b) => a.price - b.price);
 }
+
+const STOP = new Set(["de", "het", "een", "van", "met", "voor", "per", "aan", "en", "op"]);
+
+function tokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length >= 3 && !STOP.has(part));
+}
+
+function relevant(offer: Offer, query: string): boolean {
+  const parts = tokens(query);
+  if (parts.length === 0) return true;
+  const blob = `${offer.name} ${offer.brand ?? ""}`.toLowerCase();
+  const hits = parts.filter((part) => blob.includes(part)).length;
+  return hits / parts.length >= 0.5;
+}
+
+export function pickStoreOffer(offers: Offer[], retailer: string, query: string): Offer | null {
+  const pool = offers.filter((offer) => offer.retailer === retailer && offer.onSale && relevant(offer, query));
+  const house = pool.filter((offer) => offer.privateLabel);
+  const ranked = cheapest(house.length > 0 ? house : pool);
+  return ranked[0] ?? null;
+}
+
+export const houseQuotes = createServerFn({ method: "GET" })
+  .validator((input: { q?: string }) => ({ q: (input?.q ?? "").trim().slice(0, 80) }))
+  .handler(async ({ data }) => {
+    const empty = {
+      jumbo: null as Offer | null,
+      ah: null as Offer | null,
+      error: null as string | null,
+    };
+    if (data.q.length < 2) return empty;
+    const params = new URLSearchParams({
+      q: data.q,
+      retailer: "jumbo,albert_heijn",
+      promotion_status: "active",
+      page_size: "40",
+    });
+    const res = await cachedGet(`${API}/search?${params.toString()}`);
+    if (!res.ok) return { ...empty, error: res.error };
+    const body = res.body as { results?: unknown[] };
+    const offers = (body.results ?? [])
+      .map(mapOffer)
+      .filter((offer): offer is Offer => offer != null);
+    return {
+      jumbo: pickStoreOffer(offers, "jumbo", data.q),
+      ah: pickStoreOffer(offers, "albert_heijn", data.q),
+      error: null as string | null,
+    };
+  });
 
 export const searchOffers = createServerFn({ method: "GET" })
   .validator((input: { q?: string; retailers?: string[]; dealsOnly?: boolean }) => {

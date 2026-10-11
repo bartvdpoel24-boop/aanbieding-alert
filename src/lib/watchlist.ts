@@ -2,6 +2,15 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { ALL_STORE_IDS } from "@/lib/money";
 
+export type StoreQuote = {
+  price: number;
+  name: string;
+  url: string | null;
+  privateLabel: boolean;
+  unitLabel: string | null;
+  unitPrice: number | null;
+};
+
 export type WatchItem = {
   id: string;
   name: string;
@@ -16,6 +25,11 @@ export type WatchItem = {
   lastOriginal: number | null;
   lastSavings: number | null;
   lastUnitLabel: string | null;
+  lastUnitPrice: number | null;
+  lastUnitNoun: string | null;
+  jumbo: StoreQuote | null;
+  ah: StoreQuote | null;
+  quotesAt: string | null;
 };
 
 export type CartLine = {
@@ -46,6 +60,7 @@ type NewItem = {
   lastPrice?: number | null;
   lastRetailer?: string | null;
   lastUnitLabel?: string | null;
+  lastUnitNoun?: string | null;
 };
 
 type WatchState = {
@@ -72,9 +87,12 @@ type WatchState = {
       | "lastOriginal"
       | "lastSavings"
       | "lastUnitLabel"
+      | "lastUnitPrice"
+      | "lastUnitNoun"
       | "onSale"
     >,
   ) => void;
+  applyQuotes: (id: string, patch: Pick<WatchItem, "jumbo" | "ah" | "quotesAt">) => void;
   setLastGlobalCheck: (iso: string) => void;
   clearAll: () => void;
   toggleRetailer: (id: string) => void;
@@ -100,6 +118,11 @@ function blankItem(input: NewItem): WatchItem {
     lastOriginal: null,
     lastSavings: null,
     lastUnitLabel: input.lastUnitLabel ?? null,
+    lastUnitPrice: input.lastPrice ?? null,
+    lastUnitNoun: input.lastUnitNoun ?? null,
+    jumbo: null,
+    ah: null,
+    quotesAt: null,
   };
 }
 
@@ -126,6 +149,11 @@ function readLegacy(): { items: WatchItem[]; lastGlobalCheck: string | null } | 
         lastOriginal: null,
         lastSavings: null,
         lastUnitLabel: null,
+        lastUnitPrice: row.lastPrice ?? null,
+        lastUnitNoun: null,
+        jumbo: null,
+        ah: null,
+        quotesAt: null,
       }));
     return {
       items,
@@ -153,9 +181,15 @@ export const useWatchlist = create<WatchState>()(
         })),
       setThreshold: (id, threshold) =>
         set((state) => ({
-          items: state.items.map((item) => (item.id === id ? { ...item, threshold } : item)),
+          items: state.items.map((item) =>
+            item.id === id ? { ...item, threshold: Math.round(threshold * 100) / 100 } : item,
+          ),
         })),
       applyCheck: (id, patch) =>
+        set((state) => ({
+          items: state.items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+        })),
+      applyQuotes: (id, patch) =>
         set((state) => ({
           items: state.items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
         })),
@@ -221,10 +255,22 @@ export const useWatchlist = create<WatchState>()(
             state.lastGlobalCheck = legacy.lastGlobalCheck;
           }
         }
-        if (state && (!state.retailers || state.retailers.length === 0)) {
-          state.retailers = ALL_STORE_IDS;
+        if (state) {
+          state.items = state.items.map((item) => {
+            const row = item as WatchItem & { category?: string };
+            return {
+              ...row,
+              threshold: typeof row.threshold === "number" ? row.threshold : 0,
+              lastUnitPrice: row.lastUnitPrice ?? row.lastPrice ?? null,
+              lastUnitNoun: row.lastUnitNoun ?? null,
+              jumbo: row.jumbo ? { ...row.jumbo, unitPrice: row.jumbo.unitPrice ?? null } : null,
+              ah: row.ah ? { ...row.ah, unitPrice: row.ah.unitPrice ?? null } : null,
+              quotesAt: row.quotesAt ?? null,
+            };
+          });
+          if (!state.retailers || state.retailers.length === 0) state.retailers = ALL_STORE_IDS;
+          if (!state.cart) state.cart = [];
         }
-        if (state && !state.cart) state.cart = [];
         state?.setHydrated();
       },
     },

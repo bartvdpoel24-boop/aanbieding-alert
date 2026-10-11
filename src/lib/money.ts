@@ -43,24 +43,35 @@ export function when(iso: string): string {
   return whenFmt.format(date);
 }
 
-export function suggestThreshold(
-  offers: { price: number; originalPrice: number | null }[],
+export function suggestUnitThreshold(
+  offers: {
+    name: string;
+    price: number;
+    originalPrice: number | null;
+    quantity: string | null;
+    unit: string | null;
+    unitPrice: number | null;
+  }[],
 ): number | null {
-  const prices = offers.map((o) => o.price).filter((p) => p > 0);
-  if (prices.length === 0) return null;
-  const lowest = Math.min(...prices);
-  const originals = offers
-    .map((o) => o.originalPrice)
-    .filter((p): p is number => p != null && p > 0);
-  let suggested = lowest;
-  if (originals.length) {
-    const avgOrig = originals.reduce((a, b) => a + b, 0) / originals.length;
-    suggested = Math.min(lowest, Math.round(avgOrig * 0.65 * 100) / 100);
-  }
+  const units = offers
+    .map((offer) => {
+      const each = unitAmount(offer);
+      if (!(each.price > 0)) return null;
+      let original = each.price;
+      if (offer.originalPrice != null && offer.originalPrice > offer.price && offer.price > 0) {
+        original = (offer.originalPrice / offer.price) * each.price;
+      }
+      return { price: each.price, original };
+    })
+    .filter((row): row is { price: number; original: number } => row != null);
+  if (units.length === 0) return null;
+  const lowest = Math.min(...units.map((row) => row.price));
+  const avgOrig = units.reduce((sum, row) => sum + row.original, 0) / units.length;
+  const suggested = Math.min(lowest, Math.round(avgOrig * 0.65 * 100) / 100);
   return Math.round(suggested * 100) / 100;
 }
 
-const PACK = /(\d+)\s*(stuks?|st\.|rollen|rolletjes|rol)\b/i;
+const PACK = /(\d+)\s*(stuks?|st\.|rollen|rolletjes|rol|tabletten|tablet|capsules|capsule|pods?)\b/i;
 
 function packCount(text: string | null | undefined): number | null {
   if (!text) return null;
@@ -72,10 +83,37 @@ function packCount(text: string | null | undefined): number | null {
 
 function pieceNoun(name: string, quantity: string | null): string {
   const blob = `${name} ${quantity ?? ""}`.toLowerCase();
-  const roll = /\b(?:rollen|rolletjes|rol)\b/.test(blob);
-  const piece = /\bstuks?\b/.test(blob);
-  if (roll && (/toilet|wc[\s-]?papier|keukenpapier|keukenrol/.test(blob) || !piece)) return "rol";
+  if (/tablet/.test(blob)) return "tablet";
+  if (/capsule/.test(blob)) return "capsule";
+  if (/\bpods?\b/.test(blob)) return "pod";
+  if (/toilet|wc[\s-]?papier|keukenpapier|keukenrol/.test(blob)) return "rol";
+  if (/\b(?:rollen|rolletjes|rol)\b/.test(blob)) return "rol";
   return "stuk";
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+export function unitAmount(offer: {
+  name: string;
+  price: number;
+  quantity: string | null;
+  unit: string | null;
+  unitPrice: number | null;
+}): { price: number; noun: string; each: boolean } {
+  const count = packCount(offer.quantity) ?? packCount(offer.name);
+  const noun = pieceNoun(offer.name, offer.quantity);
+  if (
+    offer.unit === "stuk" &&
+    offer.unitPrice != null &&
+    offer.unitPrice > 0 &&
+    offer.unitPrice < offer.price * 0.98
+  ) {
+    return { price: round2(offer.unitPrice), noun, each: true };
+  }
+  if (count) return { price: round2(offer.price / count), noun, each: true };
+  return { price: round2(offer.price), noun: "stuk", each: false };
 }
 
 export function unitCaption(offer: {
@@ -85,19 +123,8 @@ export function unitCaption(offer: {
   unit: string | null;
   unitPrice: number | null;
 }): string | null {
-  const count = packCount(offer.quantity) ?? packCount(offer.name);
-  const noun = pieceNoun(offer.name, offer.quantity);
-  if (
-    offer.unit === "stuk" &&
-    offer.unitPrice != null &&
-    offer.unitPrice > 0 &&
-    offer.unitPrice < offer.price * 0.98
-  ) {
-    return `${euro(offer.unitPrice)} per ${noun}`;
-  }
-  if (count) {
-    return `${euro(offer.price / count)} per ${noun}`;
-  }
+  const each = unitAmount(offer);
+  if (each.each) return `${euro(each.price)} per ${each.noun}`;
   if (offer.unitPrice != null && offer.unit && offer.unit !== "stuk") {
     return `${euro(offer.unitPrice)} / ${offer.unit}`;
   }

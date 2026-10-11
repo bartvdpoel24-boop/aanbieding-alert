@@ -5,6 +5,7 @@ import {
   BellRing,
   Check,
   ExternalLink,
+  House,
   ListChecks,
   LoaderCircle,
   Minus,
@@ -18,7 +19,7 @@ import {
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { resolveAhLinks, type AhLink } from "@/lib/ah";
-import { browseDeals, searchOffers, type Offer } from "@/lib/offers";
+import { browseDeals, houseQuotes, searchOffers, type Offer } from "@/lib/offers";
 import {
   ALL_STORE_IDS,
   HOURS_BETWEEN_CHECKS,
@@ -26,11 +27,12 @@ import {
   SUGGESTED_ITEMS,
   euro,
   retailerName,
-  suggestThreshold,
+  suggestUnitThreshold,
+  unitAmount,
   unitCaption,
   when,
 } from "@/lib/money";
-import { useWatchlist, type CartLine, type WatchItem } from "@/lib/watchlist";
+import { useWatchlist, type CartLine, type StoreQuote, type WatchItem } from "@/lib/watchlist";
 
 type Tab = "lijst" | "nieuw" | "deals" | "mandje" | "info";
 
@@ -54,6 +56,19 @@ function offerToCart(offer: Offer) {
     imageUrl: offer.imageUrl,
     productUrl: offer.productUrl,
     unitLabel: unitCaption(offer),
+  };
+}
+
+function toQuote(offer: Offer | null): StoreQuote | null {
+  if (!offer) return null;
+  const each = unitAmount(offer);
+  return {
+    price: offer.price,
+    name: offer.name,
+    url: offer.productUrl,
+    privateLabel: offer.privateLabel,
+    unitLabel: unitCaption(offer),
+    unitPrice: each.each ? each.price : null,
   };
 }
 function notify(body: string) {
@@ -92,8 +107,9 @@ export function AanbiedingApp() {
   const addItem = useWatchlist((s) => s.addItem);
   const removeItem = useWatchlist((s) => s.removeItem);
   const restoreItem = useWatchlist((s) => s.restoreItem);
-  const setThreshold = useWatchlist((s) => s.setThreshold);
   const applyCheck = useWatchlist((s) => s.applyCheck);
+  const applyQuotes = useWatchlist((s) => s.applyQuotes);
+  const setThreshold = useWatchlist((s) => s.setThreshold);
   const setLastGlobalCheck = useWatchlist((s) => s.setLastGlobalCheck);
   const clearAll = useWatchlist((s) => s.clearAll);
   const addToCart = useWatchlist((s) => s.addToCart);
@@ -124,19 +140,34 @@ export function AanbiedingApp() {
 
   const hits = useMemo(
     () =>
-      items.filter((item) => item.onSale !== false && item.lastPrice != null && item.lastPrice <= item.threshold)
-        .length,
+      items.filter((item) => {
+        const price = item.lastUnitPrice ?? item.lastPrice;
+        return item.onSale !== false && price != null && item.threshold > 0 && price <= item.threshold;
+      }).length,
     [items],
   );
+
+  async function rememberQuotes(item: WatchItem) {
+    const res = await houseQuotes({ data: { q: item.name } });
+    if (res.error) return res.error;
+    applyQuotes(item.id, {
+      jumbo: toQuote(res.jumbo),
+      ah: toQuote(res.ah),
+      quotesAt: new Date().toISOString(),
+    });
+    return null;
+  }
 
   async function checkOne(item: WatchItem, silent: boolean) {
     const res = await searchOffers({
       data: { q: item.name, retailers: useWatchlist.getState().retailers, dealsOnly: true },
     });
+    const quoteError = await rememberQuotes(item);
     if (res.error) {
       if (!silent) toast.error(res.error);
       return "error" as const;
     }
+    if (quoteError && !silent) toast.error(quoteError);
     if (res.results.length === 0) {
       applyCheck(item.id, {
         lastPrice: item.lastPrice,
@@ -148,12 +179,15 @@ export function AanbiedingApp() {
         lastOriginal: item.lastOriginal,
         lastSavings: item.lastSavings,
         lastUnitLabel: item.lastUnitLabel,
+        lastUnitPrice: item.lastUnitPrice,
+        lastUnitNoun: item.lastUnitNoun,
         onSale: item.onSale,
       });
       if (!silent) toast(`${item.name}: geen actieve aanbieding gevonden.`);
       return "empty" as const;
     }
     const best = res.results[0];
+    const each = unitAmount(best);
     applyCheck(item.id, {
       lastPrice: best.price,
       lastRetailer: best.retailer,
@@ -164,17 +198,25 @@ export function AanbiedingApp() {
       lastOriginal: best.originalPrice,
       lastSavings: best.savingsPercentage,
       lastUnitLabel: unitCaption(best),
+      lastUnitPrice: each.each ? each.price : null,
+      lastUnitNoun: each.noun,
       onSale: true,
     });
     const place = retailerName(best.retailer);
-    if (best.price <= item.threshold) {
-      const msg = `${item.name} is ${euro(best.price)} bij ${place}.`;
+    const fresh = useWatchlist.getState().items.find((row) => row.id === item.id) ?? item;
+    const noun = each.noun;
+    if (fresh.threshold > 0 && each.price <= fresh.threshold) {
+      const msg = `${item.name} is ${euro(each.price)} per ${noun} bij ${place}.`;
       toast.success(msg);
       notify(msg);
       return "hit" as const;
     }
     if (!silent) {
-      toast(`${item.name}: laagste prijs ${euro(best.price)} bij ${place}. Drempel is ${euro(item.threshold)}.`);
+      toast(
+        fresh.threshold > 0
+          ? `${item.name}: ${euro(each.price)} per ${noun} bij ${place}. Drempel is ${euro(fresh.threshold)} per ${noun}.`
+          : `${item.name}: ${euro(each.price)} per ${noun} bij ${place}. Zet een drempel per ${noun}.`,
+      );
     }
     return "miss" as const;
   }
@@ -203,12 +245,21 @@ export function AanbiedingApp() {
 
   function follow(
     name: string,
-    threshold: number,
-    extra?: { onSale?: boolean; retailer?: string | null; unitLabel?: string | null },
+    extra?: {
+      threshold?: number | null;
+      onSale?: boolean;
+      retailer?: string | null;
+      unitLabel?: string | null;
+      unitNoun?: string | null;
+      paid?: number | null;
+    },
   ) {
     const clean = name.trim();
-    if (!clean || !(threshold > 0)) {
-      toast.error("Vul een product en een prijs boven nul in.");
+    const onSale = extra?.onSale !== false;
+    const paid = extra?.paid ?? null;
+    const threshold = extra?.threshold ?? null;
+    if (!clean || !(threshold != null && threshold > 0) || (!onSale && !(paid != null && paid > 0))) {
+      toast.error("Vul een product en een drempel per stuk boven nul in.");
       return;
     }
     const exists = useWatchlist.getState().items.some((item) => item.name.toLowerCase() === clean.toLowerCase());
@@ -217,16 +268,21 @@ export function AanbiedingApp() {
       setTab("lijst");
       return;
     }
-    const onSale = extra?.onSale !== false;
     addItem({
       name: clean,
       threshold: Math.round(threshold * 100) / 100,
       onSale,
-      lastPrice: onSale ? null : Math.round(threshold * 100) / 100,
+      lastPrice: onSale ? null : Math.round((paid ?? 0) * 100) / 100,
       lastRetailer: extra?.retailer ?? null,
       lastUnitLabel: extra?.unitLabel ?? null,
+      lastUnitNoun: extra?.unitNoun ?? null,
     });
-    toast.success(onSale ? `${clean} staat op je lijst.` : `${clean} toegevoegd, ook zonder aanbieding.`);
+    const noun = extra?.unitNoun || "stuk";
+    toast.success(
+      onSale
+        ? `${clean} staat op je lijst. Drempel ${euro(threshold)} per ${noun}.`
+        : `${clean} toegevoegd, ook zonder aanbieding.`,
+    );
     setDraftName("");
     setTab("lijst");
   }
@@ -327,6 +383,7 @@ export function AanbiedingApp() {
               setTab("mandje");
             }}
             onChoose={(item, offer) => {
+              const each = unitAmount(offer);
               applyCheck(item.id, {
                 lastPrice: offer.price,
                 lastRetailer: offer.retailer,
@@ -337,6 +394,8 @@ export function AanbiedingApp() {
                 lastOriginal: offer.originalPrice,
                 lastSavings: offer.savingsPercentage,
                 lastUnitLabel: unitCaption(offer),
+                lastUnitPrice: each.each ? each.price : null,
+                lastUnitNoun: each.noun,
                 onSale: true,
               });
               toast.success(`${item.name}: ${offer.name} bij ${retailerName(offer.retailer)}.`);
@@ -349,7 +408,13 @@ export function AanbiedingApp() {
         )}
         {tab === "deals" && (
           <DealsPanel
-            onFollow={(offer) => follow(offer.name, suggestThreshold([offer]) ?? offer.price)}
+            onFollow={(offer) => {
+              const each = unitAmount(offer);
+              follow(offer.name, {
+                threshold: suggestUnitThreshold([offer]) ?? each.price,
+                unitNoun: each.noun,
+              });
+            }}
             onBasket={basket}
           />
         )}
@@ -431,6 +496,38 @@ function ListPanel({
   const retailers = useWatchlist((s) => s.retailers);
   const [alts, setAlts] = useState<Record<string, { loading: boolean; offers: Offer[]; error: string | null }>>({});
   const [altAll, setAltAll] = useState(false);
+  const [quoting, setQuoting] = useState<Record<string, boolean>>({});
+  const quoteKey = items.map((item) => `${item.id}:${item.quotesAt ?? ""}`).join("|");
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const stale = useWatchlist.getState().items.filter((item) => {
+      if (!item.quotesAt) return true;
+      return Date.now() - new Date(item.quotesAt).getTime() > 12 * 60 * 60 * 1000;
+    });
+    if (stale.length === 0) return;
+    let cancel = false;
+    void (async () => {
+      for (const item of stale) {
+        if (cancel) return;
+        setQuoting((current) => ({ ...current, [item.id]: true }));
+        const res = await houseQuotes({ data: { q: item.name } });
+        if (cancel) return;
+        if (!res.error) {
+          useWatchlist.getState().applyQuotes(item.id, {
+            jumbo: toQuote(res.jumbo),
+            ah: toQuote(res.ah),
+            quotesAt: new Date().toISOString(),
+          });
+        }
+        setQuoting((current) => ({ ...current, [item.id]: false }));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [hydrated, quoteKey]);
 
   async function loadAlt(item: WatchItem) {
     setAlts((current) => ({
@@ -471,7 +568,8 @@ function ListPanel({
         <div>
           <h2 className="font-display text-2xl">Jouw lijst</h2>
           <p className="text-sm text-muted">
-            {lastGlobalCheck ? `Laatste ronde ${when(lastGlobalCheck)}` : "Nog niet gecontroleerd"}
+            {lastGlobalCheck ? `Laatste ronde ${when(lastGlobalCheck)}. ` : ""}
+            De drempel is de prijs per stuk, bijvoorbeeld per rol of per tablet.
           </p>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
@@ -521,127 +619,200 @@ function ListPanel({
       )}
 
       {hydrated && items.length > 0 && (
-        <ul className="overflow-hidden rounded-3xl border border-border bg-surface shadow-sm">
+        <div className="overflow-hidden rounded-3xl border border-border bg-surface shadow-sm">
+          <div className="grid grid-cols-3 gap-2 border-b border-border bg-paper px-4 py-2 text-xs font-medium text-muted">
+            <span>Laatst gezien</span>
+            <span className="inline-flex items-center gap-1">
+              <House className="size-3 shrink-0" aria-hidden="true" />
+              Huisprijs Jumbo
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <House className="size-3 shrink-0" aria-hidden="true" />
+              Huisprijs AH
+            </span>
+          </div>
+          <ul>
           {items.map((item) => {
-            const under = item.onSale !== false && item.lastPrice != null && item.lastPrice <= item.threshold;
-            const over = item.lastPrice != null && item.lastPrice > item.threshold;
+            const noun = item.lastUnitNoun || "stuk";
+            const seen = item.lastUnitPrice ?? item.lastPrice;
+            const under = item.onSale !== false && seen != null && item.threshold > 0 && seen <= item.threshold;
+            const over = seen != null && item.threshold > 0 && seen > item.threshold;
+            const jumboEach = item.jumbo ? (item.jumbo.unitPrice ?? item.jumbo.price) : null;
+            const ahEach = item.ah ? (item.ah.unitPrice ?? item.ah.price) : null;
             return (
               <li key={item.id} className="border-b border-border px-4 py-4 last:border-b-0">
-                <div className="flex gap-3">
-                  <Thumb src={item.lastImage} />
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="font-display text-lg leading-tight">{item.name}</h3>
-                      {over && item.onSale !== false && (
-                        <span className="shrink-0 rounded-full bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent">
-                          Nog te duur
-                        </span>
-                      )}
-                      {item.onSale === false && (
-                        <span className="shrink-0 rounded-full bg-paper px-2.5 py-1 text-xs font-medium text-muted">
-                          Geen actie
-                        </span>
-                      )}
-                    </div>
-                    {item.lastPrice != null ? (
-                      <p className="mt-1 text-sm tabular-nums">
-                        <span className={under ? "font-semibold text-primary" : "text-fg"}>{euro(item.lastPrice)}</span>
-                        <span className="text-muted"> · {retailerName(item.lastRetailer)}</span>
-                        {item.lastSavings != null && item.lastSavings > 0 && (
-                          <span className="text-accent"> · −{Math.round(item.lastSavings)}%</span>
-                        )}
-                      </p>
-                    ) : (
-                      <p className="mt-1 text-sm text-muted">Nog geen prijs opgehaald</p>
-                    )}
-                    {item.lastUnitLabel && <p className="text-xs text-muted tabular-nums">{item.lastUnitLabel}</p>}
+                    <h3 className="font-display text-lg leading-tight">{item.name}</h3>
                     {item.lastName && item.lastName.toLowerCase() !== item.name.toLowerCase() && (
                       <p className="truncate text-xs text-muted">Gevonden: {item.lastName}</p>
                     )}
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <label className="flex items-center gap-2 text-xs text-muted">
-                        Drempel
-                        <input
-                          type="number"
-                          inputMode="decimal"
-                          min={0.01}
-                          step={0.01}
-                          aria-label={`Drempel voor ${item.name}`}
-                          value={item.threshold}
-                          onChange={(event) => {
-                            const next = Number(event.target.value);
-                            if (Number.isFinite(next) && next > 0) onThreshold(item.id, Math.round(next * 100) / 100);
-                          }}
-                          className="h-11 w-28 rounded-xl border border-border bg-paper px-3 text-sm text-fg tabular-nums"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => onCheck(item)}
-                        disabled={busy != null}
-                        className="inline-flex h-11 items-center gap-1.5 rounded-full border border-border px-3 text-sm disabled:opacity-50"
-                      >
-                        {busy === item.id ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
-                        Check
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void loadAlt(item)}
-                        disabled={alts[item.id]?.loading || altAll}
-                        className="inline-flex h-11 items-center gap-1.5 rounded-full border border-border px-3 text-sm disabled:opacity-50"
-                      >
-                        {alts[item.id]?.loading ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : (
-                          <ArrowLeftRight className="size-4" aria-hidden="true" />
-                        )}
-                        Alternatieven
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onDrop(item)}
-                        className="inline-flex h-11 items-center gap-1.5 rounded-full px-3 text-sm text-muted"
-                      >
-                        <Trash2 className="size-4" aria-hidden="true" />
-                        Weg
-                      </button>
-                      {isAh(item.lastRetailer) && item.lastPrice != null && (
-                        <button
-                          type="button"
-                          onClick={() => onBasket(item)}
-                          className="inline-flex h-11 items-center gap-1.5 rounded-full px-3 text-sm font-medium text-primary"
-                        >
-                          <ShoppingBasket className="size-4" aria-hidden="true" />
-                          In mandje
-                        </button>
-                      )}
-                      {item.lastProductUrl && (
-                        <a
-                          href={item.lastProductUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex h-11 items-center text-sm font-medium text-primary"
-                        >
-                          Bij de winkel
-                        </a>
-                      )}
-                    </div>
-                    {alts[item.id] && (
-                      <AltList
-                        state={alts[item.id]}
-                        onChoose={(offer) => onChoose(item, offer)}
-                        onBasket={onBasketOffer}
-                      />
-                    )}
                   </div>
+                  <label className="w-28 shrink-0 text-[11px] text-muted">
+                    Drempel per {noun}
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min={0.01}
+                      step={0.01}
+                      aria-label={`Drempel per ${noun} voor ${item.name}`}
+                      value={item.threshold > 0 ? item.threshold : ""}
+                      placeholder="0,30"
+                      onChange={(event) => {
+                        const next = Number(event.target.value);
+                        if (Number.isFinite(next) && next > 0) onThreshold(item.id, next);
+                      }}
+                      className="mt-1 h-9 w-full rounded-lg border border-border bg-paper px-2 text-sm text-fg tabular-nums"
+                    />
+                  </label>
                 </div>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <PriceCell
+                    price={item.lastPrice}
+                    detail={item.lastPrice != null ? retailerName(item.lastRetailer) : "nog geen prijs"}
+                    extra={
+                      item.lastSavings != null && item.lastSavings > 0 ? `−${Math.round(item.lastSavings)}%` : null
+                    }
+                    unit={item.lastUnitLabel}
+                    under={under}
+                  />
+                  <PriceCell
+                    price={item.jumbo?.price ?? null}
+                    detail={
+                      item.jumbo
+                        ? item.jumbo.privateLabel
+                          ? "Huismerk"
+                          : item.jumbo.name
+                        : quoting[item.id]
+                          ? "ophalen…"
+                          : "geen actie"
+                    }
+                    unit={item.jumbo?.unitLabel}
+                    href={item.jumbo?.url}
+                    under={jumboEach != null && item.threshold > 0 && jumboEach <= item.threshold}
+                  />
+                  <PriceCell
+                    price={item.ah?.price ?? null}
+                    detail={
+                      item.ah
+                        ? item.ah.privateLabel
+                          ? "Huismerk"
+                          : item.ah.name
+                        : quoting[item.id]
+                          ? "ophalen…"
+                          : "geen actie"
+                    }
+                    unit={item.ah?.unitLabel}
+                    href={item.ah?.url}
+                    under={ahEach != null && item.threshold > 0 && ahEach <= item.threshold}
+                  />
+                </div>
+                {over && item.onSale !== false ? (
+                  <p className="mt-2 text-xs text-accent">Nog te duur per {noun}</p>
+                ) : null}
+                {item.onSale === false ? (
+                  <p className="mt-2 text-xs text-muted">Geen actie tot er een aanbieding is</p>
+                ) : null}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onCheck(item)}
+                    disabled={busy != null}
+                    className="inline-flex h-11 items-center gap-1.5 rounded-full border border-border px-3 text-sm disabled:opacity-50"
+                  >
+                    {busy === item.id ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+                    Check
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadAlt(item)}
+                    disabled={alts[item.id]?.loading || altAll}
+                    className="inline-flex h-11 items-center gap-1.5 rounded-full border border-border px-3 text-sm disabled:opacity-50"
+                  >
+                    {alts[item.id]?.loading ? (
+                      <LoaderCircle className="size-4 animate-spin" />
+                    ) : (
+                      <ArrowLeftRight className="size-4" aria-hidden="true" />
+                    )}
+                    Alternatieven
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDrop(item)}
+                    className="inline-flex h-11 items-center gap-1.5 rounded-full px-3 text-sm text-muted"
+                  >
+                    <Trash2 className="size-4" aria-hidden="true" />
+                    Weg
+                  </button>
+                  {isAh(item.lastRetailer) && item.lastPrice != null && (
+                    <button
+                      type="button"
+                      onClick={() => onBasket(item)}
+                      className="inline-flex h-11 items-center gap-1.5 rounded-full px-3 text-sm font-medium text-primary"
+                    >
+                      <ShoppingBasket className="size-4" aria-hidden="true" />
+                      In mandje
+                    </button>
+                  )}
+                  {item.lastProductUrl && (
+                    <a
+                      href={item.lastProductUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex h-11 items-center text-sm font-medium text-primary"
+                    >
+                      Bij de winkel
+                    </a>
+                  )}
+                </div>
+                {alts[item.id] && (
+                  <AltList state={alts[item.id]} onChoose={(offer) => onChoose(item, offer)} onBasket={onBasketOffer} />
+                )}
               </li>
             );
           })}
-        </ul>
+          </ul>
+        </div>
       )}
     </section>
   );
+}
+
+function PriceCell({
+  price,
+  detail,
+  extra,
+  unit,
+  href,
+  under,
+}: {
+  price: number | null;
+  detail: string;
+  extra?: string | null;
+  unit?: string | null;
+  href?: string | null;
+  under: boolean;
+}) {
+  const body = (
+    <>
+      <p className={"text-sm tabular-nums " + (under ? "font-semibold text-primary" : "text-fg")}>
+        {price != null ? euro(price) : "—"}
+      </p>
+      <p className="line-clamp-2 text-[11px] leading-snug text-muted">
+        {detail}
+        {extra ? ` · ${extra}` : ""}
+      </p>
+      {unit && <p className="text-[11px] text-muted tabular-nums">{unit}</p>}
+    </>
+  );
+  if (href && price != null) {
+    return (
+      <a href={href} target="_blank" rel="noreferrer" className="min-w-0">
+        {body}
+      </a>
+    );
+  }
+  return <div className="min-w-0">{body}</div>;
 }
 
 function AltList({
@@ -708,14 +879,21 @@ function AddPanel({
   initialName: string;
   onFollow: (
     name: string,
-    threshold: number,
-    extra?: { onSale?: boolean; retailer?: string | null; unitLabel?: string | null },
+    extra?: {
+      threshold?: number | null;
+      onSale?: boolean;
+      retailer?: string | null;
+      unitLabel?: string | null;
+      unitNoun?: string | null;
+      paid?: number | null;
+    },
   ) => void;
   onBasket: (offer: Offer) => void;
   onPlainCart: (name: string, price: number, unitLabel: string | null) => void;
 }) {
   const retailers = useWatchlist((s) => s.retailers);
   const [name, setName] = useState(initialName);
+  const [paid, setPaid] = useState("");
   const [threshold, setThreshold] = useState("");
   const [results, setResults] = useState<Offer[]>([]);
   const [searching, setSearching] = useState(false);
@@ -726,11 +904,13 @@ function AddPanel({
 
   const storeChoices = STORES.filter((store) => retailers.includes(store.id));
   const activeStore = storeChoices.some((store) => store.id === storeId) ? storeId : (storeChoices[0]?.id ?? "");
-  const typedPrice = Number(threshold.replace(",", "."));
+  const typedPrice = Number(paid.replace(",", "."));
   const plainLabel =
     plain && name.trim() && typedPrice > 0
       ? unitCaption({ name, price: typedPrice, quantity: null, unit: null, unitPrice: null })
       : null;
+  const typedThreshold = Number(threshold.replace(",", "."));
+  const noun = results.map((offer) => unitAmount(offer)).find((each) => each.each)?.noun ?? "stuk";
 
   useEffect(() => {
     setName(initialName);
@@ -754,6 +934,10 @@ function AddPanel({
         .then((res) => {
           setResults(res.results.slice(0, 6));
           if (res.error) setHint(res.error);
+          if (!threshold) {
+            const suggested = suggestUnitThreshold(res.results);
+            if (suggested) setThreshold(suggested.toFixed(2));
+          }
         })
         .finally(() => setSearching(false));
     }, 400);
@@ -774,23 +958,25 @@ function AddPanel({
       return;
     }
     if (res.results.length === 0) {
-      setHint("Geen actieve aanbieding bij je gekozen supermarkten. Zet zelf een drempel, of voeg het toe zonder aanbieding.");
+      setHint("Geen actieve aanbieding bij je gekozen supermarkten.");
       return;
     }
-    const value = suggestThreshold(res.results);
+    const value = suggestUnitThreshold(res.results);
     if (value == null) return;
     setThreshold(value.toFixed(2));
     const best = res.results[0];
-    const each = unitCaption(best);
+    const each = unitAmount(best);
     setHint(
-      `Voorstel ${euro(value)}. Laagste aanbieding nu is ${euro(best.price)} bij ${retailerName(best.retailer)}${each ? ` (${each})` : ""}.`,
+      `Voorstel ${euro(value)} per ${each.noun}. Nu ${euro(each.price)} per ${each.noun} bij ${retailerName(best.retailer)}.`,
     );
   }
 
   return (
     <section className="rise">
       <h2 className="font-display text-2xl">Product toevoegen</h2>
-      <p className="mt-1 text-sm text-muted">Zoek een boodschap en kies de prijs waaronder je een seintje wilt.</p>
+      <p className="mt-1 text-sm text-muted">
+        Zoek een boodschap en zet de drempel op de prijs per stuk, rol of tablet.
+      </p>
 
       <button
         type="button"
@@ -836,7 +1022,8 @@ function AddPanel({
                   type="button"
                   onClick={() => {
                     setName(offer.name);
-                    if (!threshold) setThreshold((suggestThreshold([offer]) ?? offer.price).toFixed(2));
+                    const each = unitAmount(offer);
+                    if (!threshold) setThreshold(each.price.toFixed(2));
                   }}
                   className="flex min-w-0 flex-1 items-center gap-3 text-left"
                 >
@@ -885,40 +1072,57 @@ function AddPanel({
         </label>
       )}
 
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-        <div className="sm:flex-1">
-          <label className="block text-sm font-medium" htmlFor="threshold">
-            {plain ? "Prijs die je nu betaalt" : "Maximale prijs"}
+      <label className="mt-4 block text-sm font-medium" htmlFor="unit-threshold">
+        Drempel per {noun}
+        <input
+          id="unit-threshold"
+          type="number"
+          inputMode="decimal"
+          min={0.01}
+          step={0.01}
+          value={threshold}
+          onChange={(event) => setThreshold(event.target.value)}
+          placeholder="0,30"
+          className="mt-2 h-12 w-full rounded-2xl border border-border bg-surface px-4 text-base tabular-nums"
+        />
+      </label>
+      <p className="mt-2 text-sm text-muted">Seintje als de prijs per {noun} hieronder komt, niet de prijs van de hele verpakking.</p>
+
+      {plain && (
+        <div className="mt-4">
+          <label className="block text-sm font-medium" htmlFor="paid-price">
+            Prijs die je nu betaalt
           </label>
           <input
-            id="threshold"
+            id="paid-price"
             type="number"
             inputMode="decimal"
             min={0.01}
             step={0.01}
-            value={threshold}
-            onChange={(event) => setThreshold(event.target.value)}
+            value={paid}
+            onChange={(event) => setPaid(event.target.value)}
             placeholder="3,50"
             className="mt-2 h-12 w-full rounded-2xl border border-border bg-surface px-4 text-base tabular-nums"
           />
         </div>
-        {!plain && (
-          <button
-            type="button"
-            onClick={() => void suggest()}
-            disabled={suggesting}
-            className="inline-flex h-12 items-center justify-center gap-2 rounded-full border border-border bg-paper px-4 text-sm font-medium disabled:opacity-50"
-          >
-            {suggesting ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4 text-accent" />}
-            Grok stelt een prijs voor
-          </button>
-        )}
-      </div>
+      )}
+
+      {!plain && (
+        <button
+          type="button"
+          onClick={() => void suggest()}
+          disabled={suggesting}
+          className="mt-4 inline-flex h-12 items-center justify-center gap-2 rounded-full border border-border bg-paper px-4 text-sm font-medium disabled:opacity-50"
+        >
+          {suggesting ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4 text-accent" />}
+          Grok stelt een stukprijs voor
+        </button>
+      )}
       {hint && <p className="mt-3 text-sm text-muted">{hint}</p>}
       {plainLabel && <p className="mt-2 text-sm text-muted tabular-nums">Stukprijs: {plainLabel}</p>}
       {plain && (
         <p className="mt-3 text-sm text-muted">
-          Dit product hoeft niet in de aanbieding te zijn. Je krijgt alsnog een seintje als het later onder deze prijs komt.
+          Dit product hoeft niet in de aanbieding te zijn. Je krijgt een seintje als de prijs per {noun} onder je drempel komt.
         </p>
       )}
 
@@ -927,8 +1131,16 @@ function AddPanel({
         onClick={() =>
           onFollow(
             name,
-            Number(threshold.replace(",", ".")),
-            plain ? { onSale: false, retailer: activeStore, unitLabel: plainLabel } : undefined,
+            plain
+              ? {
+                  onSale: false,
+                  retailer: activeStore,
+                  unitLabel: plainLabel,
+                  paid: typedPrice,
+                  threshold: typedThreshold,
+                  unitNoun: noun,
+                }
+              : { threshold: typedThreshold, unitNoun: noun },
           )
         }
         className="mt-5 inline-flex h-12 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-semibold text-on-primary"
@@ -939,7 +1151,7 @@ function AddPanel({
       {plain && isAh(activeStore) && (
         <button
           type="button"
-          onClick={() => onPlainCart(name, Number(threshold.replace(",", ".")), plainLabel)}
+          onClick={() => onPlainCart(name, typedPrice, plainLabel)}
           className="mt-2 inline-flex h-12 w-full items-center justify-center gap-2 rounded-full border border-primary text-sm font-semibold text-primary"
         >
           <ShoppingBasket className="size-4" />
@@ -1455,7 +1667,7 @@ function InfoPanel({
       <div className="rounded-3xl border border-border bg-surface p-5 shadow-sm">
         <h2 className="font-display text-2xl">Meldingen</h2>
         <p className="mt-1 text-sm text-muted">
-          Een seintje zodra een product onder jouw drempel zakt. De app checkt ook zelf als je hem opent en de vorige ronde meer dan {HOURS_BETWEEN_CHECKS} uur geleden is.
+          Een seintje zodra de prijs per stuk onder jouw drempel zakt. De app checkt ook zelf als je hem opent en de vorige ronde meer dan {HOURS_BETWEEN_CHECKS} uur geleden is.
         </p>
         <button
           type="button"
