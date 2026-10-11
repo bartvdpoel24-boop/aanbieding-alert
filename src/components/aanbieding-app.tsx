@@ -13,6 +13,7 @@ import {
   Plus,
   Search,
   ShoppingBasket,
+  ScanLine,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -33,12 +34,14 @@ import {
   when,
 } from "@/lib/money";
 import { useWatchlist, type CartLine, type StoreQuote, type WatchItem } from "@/lib/watchlist";
+import { ScanPanel } from "@/components/scan-panel";
 
-type Tab = "lijst" | "nieuw" | "deals" | "mandje" | "info";
+type Tab = "lijst" | "nieuw" | "scan" | "deals" | "mandje" | "info";
 
 const TABS: { id: Tab; label: string; icon: typeof ListChecks }[] = [
   { id: "lijst", label: "Lijst", icon: ListChecks },
   { id: "nieuw", label: "Nieuw", icon: Plus },
+  { id: "scan", label: "Scan", icon: ScanLine },
   { id: "deals", label: "Deals", icon: Percent },
   { id: "mandje", label: "Mandje", icon: ShoppingBasket },
   { id: "info", label: "Instellingen", icon: SlidersHorizontal },
@@ -119,6 +122,8 @@ export function AanbiedingApp() {
   const [draftName, setDraftName] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [itemNotes, setItemNotes] = useState<Record<string, string>>({});
+  const [allNote, setAllNote] = useState<string | null>(null);
   const booted = useRef(false);
 
   useEffect(() => {
@@ -163,11 +168,10 @@ export function AanbiedingApp() {
       data: { q: item.name, retailers: useWatchlist.getState().retailers, dealsOnly: true },
     });
     const quoteError = await rememberQuotes(item);
+    const note = (text: string) => (silent ? null : quoteError ? `${text} ${quoteError}` : text);
     if (res.error) {
-      if (!silent) toast.error(res.error);
-      return "error" as const;
+      return { status: "error" as const, message: note(res.error) };
     }
-    if (quoteError && !silent) toast.error(quoteError);
     if (res.results.length === 0) {
       applyCheck(item.id, {
         lastPrice: item.lastPrice,
@@ -183,8 +187,10 @@ export function AanbiedingApp() {
         lastUnitNoun: item.lastUnitNoun,
         onSale: item.onSale,
       });
-      if (!silent) toast(`${item.name}: geen actieve aanbieding gevonden.`);
-      return "empty" as const;
+      return {
+        status: "empty" as const,
+        message: note(`${item.name}: geen actieve aanbieding gevonden.`),
+      };
     }
     const best = res.results[0];
     const each = unitAmount(best);
@@ -207,18 +213,17 @@ export function AanbiedingApp() {
     const noun = each.noun;
     if (fresh.threshold > 0 && each.price <= fresh.threshold) {
       const msg = `${item.name} is ${euro(each.price)} per ${noun} bij ${place}.`;
-      toast.success(msg);
       notify(msg);
-      return "hit" as const;
+      return { status: "hit" as const, message: note(msg) };
     }
-    if (!silent) {
-      toast(
+    return {
+      status: "miss" as const,
+      message: note(
         fresh.threshold > 0
           ? `${item.name}: ${euro(each.price)} per ${noun} bij ${place}. Drempel is ${euro(fresh.threshold)} per ${noun}.`
           : `${item.name}: ${euro(each.price)} per ${noun} bij ${place}. Zet een drempel per ${noun}.`,
-      );
-    }
-    return "miss" as const;
+      ),
+    };
   }
 
   async function checkAll(silent: boolean) {
@@ -229,18 +234,17 @@ export function AanbiedingApp() {
     for (let i = 0; i < list.length; i++) {
       setProgress(`${i + 1} van ${list.length}`);
       const result = await checkOne(list[i], true);
-      if (result === "hit") found += 1;
+      if (result.status === "hit") found += 1;
       if (i < list.length - 1) await new Promise((r) => setTimeout(r, 350));
     }
     const stamp = new Date().toISOString();
     setLastGlobalCheck(stamp);
     setBusy(null);
     setProgress(null);
-    if (!silent) {
-      toast.success(found ? `${found} product${found === 1 ? "" : "en"} onder je drempel.` : "Niets onder je drempel.");
-    } else if (found) {
-      toast.success(`${found} product${found === 1 ? "" : "en"} onder je drempel.`);
-    }
+    const summary = found
+      ? `${found} product${found === 1 ? "" : "en"} onder je drempel.`
+      : "Niets onder je drempel.";
+    if (!silent || found) setAllNote(summary);
   }
 
   function follow(
@@ -347,20 +351,20 @@ export function AanbiedingApp() {
       </header>
 
       <main className="mx-auto max-w-3xl px-4 pt-5 pb-32">
-        {progress && (
-          <p className="mb-4 rounded-2xl bg-accent-soft px-4 py-3 text-sm text-fg">
-            Prijzen nalopen… {progress}
-          </p>
-        )}
         {tab === "lijst" && (
           <ListPanel
             items={items}
             hydrated={hydrated}
             lastGlobalCheck={lastGlobalCheck}
             busy={busy}
-            onCheck={(item) => {
+            progress={progress}
+            allNote={allNote}
+            itemNotes={itemNotes}
+            onCheck={async (item) => {
               setBusy(item.id);
-              void checkOne(item, false).finally(() => setBusy(null));
+              const result = await checkOne(item, false);
+              setBusy(null);
+              if (result.message) setItemNotes((current) => ({ ...current, [item.id]: result.message as string }));
             }}
             onCheckAll={() => void checkAll(false)}
             onDrop={drop}
@@ -405,6 +409,20 @@ export function AanbiedingApp() {
         )}
         {tab === "nieuw" && (
           <AddPanel initialName={draftName} onFollow={follow} onBasket={basket} onPlainCart={basketPlain} />
+        )}
+        {tab === "scan" && (
+          <ScanPanel
+            onList={(product, price) => {
+              addToCart({
+                id: `lijst-${product.id}`,
+                name: product.title,
+                price,
+                imageUrl: product.image,
+                productUrl: product.ah?.url ?? product.jumbo?.url ?? null,
+                unitLabel: product.size,
+              });
+            }}
+          />
         )}
         {tab === "deals" && (
           <DealsPanel
@@ -471,6 +489,9 @@ function ListPanel({
   hydrated,
   lastGlobalCheck,
   busy,
+  progress,
+  allNote,
+  itemNotes,
   onCheck,
   onCheckAll,
   onDrop,
@@ -484,6 +505,9 @@ function ListPanel({
   hydrated: boolean;
   lastGlobalCheck: string | null;
   busy: string | null;
+  progress: string | null;
+  allNote: string | null;
+  itemNotes: Record<string, string>;
   onCheck: (item: WatchItem) => void;
   onCheckAll: () => void;
   onDrop: (item: WatchItem) => void;
@@ -593,6 +617,8 @@ function ListPanel({
           </button>
         </div>
       </div>
+      {progress && <p className="mb-3 text-sm text-muted">Prijzen nalopen… {progress}</p>}
+      {allNote && <p className="mb-3 text-sm text-primary">{allNote}</p>}
 
       {!hydrated && <p className="rounded-3xl bg-surface px-5 py-8 text-sm text-muted shadow-sm">Lijst laden…</p>}
 
@@ -723,6 +749,7 @@ function ListPanel({
                     {busy === item.id ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
                     Check
                   </button>
+                  {itemNotes[item.id] && <p className="w-full text-sm text-primary">{itemNotes[item.id]}</p>}
                   <button
                     type="button"
                     onClick={() => void loadAlt(item)}
