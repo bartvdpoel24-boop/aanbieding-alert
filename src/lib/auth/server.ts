@@ -151,26 +151,46 @@ export const SESSION_TOKEN_COOKIE = "__Host-grok-auth.session_token";
 // Built separately so the `betterAuth({...})` call stays easy to edit without
 // breaking brackets (models often trip on the conditional plugin spread).
 const grokOAuthPlugin = authConfigured
-  ? genericOAuth({
-      config: GROK_PROVIDERS.map(({ providerId, idp }) => ({
-        providerId,
-        clientId: grokClientId as string,
-        clientSecret: grokClientSecret as string,
-        // Prefer static endpoints over `discoveryUrl` so initiating (and
-        // completing) OAuth does not wait on a broker discovery fetch.
-        authorizationUrl: grokAuthorizationUrl,
-        tokenUrl: grokTokenUrl,
-        userInfoUrl: grokUserInfoUrl,
-        scopes: ["openid", "profile", "email"],
-        // `prompt: "login"` forces the broker to re-authenticate against the
-        // upstream on every sign-in instead of silently reusing an existing
-        // broker session. Combined with the broker sending Google
-        // `prompt=select_account`, the user always gets the account chooser
-        // and can pick (or switch) which account to sign in with.
-        authorizationUrlParams: { idp, prompt: "login" },
-      })),
-    })
+  ? withLegacyCallbackPath(
+      genericOAuth({
+        config: GROK_PROVIDERS.map(({ providerId, idp }) => ({
+          providerId,
+          clientId: grokClientId as string,
+          clientSecret: grokClientSecret as string,
+          // Prefer static endpoints over `discoveryUrl` so initiating (and
+          // completing) OAuth does not wait on a broker discovery fetch.
+          authorizationUrl: grokAuthorizationUrl,
+          tokenUrl: grokTokenUrl,
+          userInfoUrl: grokUserInfoUrl,
+          scopes: ["openid", "profile", "email"],
+          // `prompt: "login"` forces the broker to re-authenticate against the
+          // upstream on every sign-in instead of silently reusing an existing
+          // broker session. Combined with the broker sending Google
+          // `prompt=select_account`, the user always gets the account chooser
+          // and can pick (or switch) which account to sign in with.
+          authorizationUrlParams: { idp, prompt: "login" },
+        })),
+      }),
+    )
   : null;
+
+/** Better Auth 1.7 calls the callback `/callback/:id`. The broker still allows only `/oauth2/callback/:id`. */
+function withLegacyCallbackPath<T extends { init?: (ctx: never) => Promise<{ context: { socialProviders: { id?: string; callbackPath?: string }[] } }> }>(
+  plugin: T,
+): T {
+  const init = plugin.init?.bind(plugin);
+  if (!init) return plugin;
+  return {
+    ...plugin,
+    async init(ctx) {
+      const result = await init(ctx);
+      for (const provider of result.context.socialProviders) {
+        if (provider.id) provider.callbackPath = `/oauth2/callback/${provider.id}`;
+      }
+      return result;
+    },
+  };
+}
 
 export const auth = betterAuth({
   baseURL,
